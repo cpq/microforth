@@ -14,23 +14,51 @@
 #define MICROFORTH_STACK_SIZE 10
 #endif
 
-typedef int (*forth_print_fn_t)(const char *buf, int len, void *userdata);
-//typedef int (*forth_vprint_fn_t)(forth_print_fn_t, void *, va_list *);
+#ifndef MICROFORTH_MEM_SIZE
+#define MICROFORTH_MEM_SIZE 256
+#endif
 
-struct word {
-  struct word *next;
-};
+struct forth;
+typedef int (*forth_print_fn_t)(const char *buf, int len, void *userdata);
 
 struct forth {
-  char buf[MICROFORTH_MAX_WORD_LEN];
-  int buflen;
-  double stack[MICROFORTH_STACK_SIZE];
-  int stacklen;
-  unsigned char inword;
-  forth_print_fn_t printfn;
-  void *printfn_data;
-  struct word *words;
+  char buf[MICROFORTH_MAX_WORD_LEN];  // Input buffer
+  int buflen;                         // Input buffer length
+  double stack[MICROFORTH_STACK_SIZE]; // Stack
+  int stacklen;                        // Current stack length
+  unsigned char mem[MICROFORTH_MEM_SIZE];  // Memory buffer - word definitions
+  int memlen;                              // Used memory
+  unsigned char state;                 // VM state
+#define MICROFORTH_STATE_IN_WORD 1
+#define MICROFORTH_STATE_IN_DEFINITION 2
+#define MICROFORTH_STATE_DEFINITION_WORD_SCANNED 4
+  forth_print_fn_t printfn;            // Printing function
+  void *printfn_data;                  // Printing function data
 };
+
+static void forth_add_word(struct forth *f, const char *name, char *code,
+                           void (*fn)(struct forth *)) {
+  unsigned char *mem = f->mem + f->memlen;
+  int namelen = strlen(name);
+  int codelen = code == NULL ? 0 : strlen(code);
+  int flen = code == NULL ? sizeof(fn) : 0;
+  mem[0] = namelen + 1 + codelen + 1 + flen + 1;
+  memcpy(mem + 1, name, namelen + 1);
+  mem[1 + namelen + 1] = '\0';
+  if (code != NULL) memcpy(mem + 1 + namelen + 1, code, codelen + 1);
+  if (flen > 0) memcpy(mem + 1 + namelen + 1 + codelen + 1, &fn, flen);
+  // printf("ADDED WORD [%s] cl %d flen %d fn %p total len %d\n", &mem[1],
+  // codelen, flen, fn, (int) mem[0]);
+  f->memlen += mem[0];
+}
+
+static int forth_find_word(struct forth *f, const char *name) {
+  int n;
+  for (n = 0; n < f->memlen; n += f->mem[n]) {
+    if (strcmp((char *) &f->mem[n + 1], name) == 0) return n;
+  }
+  return -1;
+}
 
 int forth_vprintf(forth_print_fn_t fn, void *fnd, const char *fmt, va_list p) {
   int i = 0, n = 0;
@@ -105,28 +133,67 @@ static void forth_execute_word(struct forth *f, char *buf, int len) {
   char *end = NULL;
   double dv = strtod(buf, &end);
   if (end == buf + len) {
-    if (f->stacklen >= sizeof(f->stack) / sizeof(f->stack[0])) {
+    if (f->stacklen >= (int) (sizeof(f->stack) / sizeof(f->stack[0]))) {
       f->stacklen = 0;
     }
-    forth_printf(f->printfn, f->printfn_data, "NUMBER: [%.*s]\n", len, buf);
+    f->stack[f->stacklen++] = dv;
+    forth_printf(f->printfn, f->printfn_data, "%.*s ok\n", len, buf);
   } else {
-    forth_printf(f->printfn, f->printfn_data, "WORD: [%.*s]\n", len, buf);
+    int n = forth_find_word(f, buf);
+    if (n < 0) {
+      forth_printf(f->printfn, f->printfn_data, "%.*s error\n", len, buf);
+    } else {
+      int off = n + 1 + strlen((char *) &f->mem[n + 1]) + 1;
+      if (f->mem[off] == 0) {
+        void (*fn)(struct forth *);
+        memcpy(&fn, &f->mem[off + 1], sizeof(fn));
+        // printf("EXECING FN %p\n", fn);
+        fn(f);
+      }
+    }
   }
 }
 
-static void forth_process_char(struct forth *f, int c) {
+static void forth_word_plus(struct forth *f) {
+  if (f->stacklen < 2) {
+    forth_printf(f->printfn, f->printfn_data, "%s: stack undeflow\n", __func__);
+  } else {
+    f->stack[f->stacklen - 2] =
+        f->stack[f->stacklen - 2] + f->stack[f->stacklen - 1];
+    f->stacklen--;
+    forth_printf(f->printfn, f->printfn_data, "%g ok\n",
+                 f->stack[f->stacklen - 1]);
+  }
+}
+
+static void forth_word_words(struct forth *f) {
+  int n;
+  for (n = 0; n < f->memlen; n += f->mem[n]) {
+    const char *delim = n == 0 ? "" : " ";
+    forth_printf(f->printfn, f->printfn_data, "%s%s", delim, &f->mem[n + 1]);
+  }
+  forth_printf(f->printfn, f->printfn_data, " ok\n"); 
+}
+
+void forth_register_core_words(struct forth *f) {
+  forth_add_word(f, "words", NULL, forth_word_words);
+  forth_add_word(f, "+", NULL, forth_word_plus);
+}
+
+void forth_process_char(struct forth *f, int c) {
   int space = c == ' ' || c == '\r' || c == '\n' || c == '\t';
-  if (f->buflen >= sizeof(f->buf)) f->buflen = 0;
-  if (!f->inword && space) {
+  int inword = f->state & MICROFORTH_STATE_IN_WORD;
+  if (f->buflen >= (int) sizeof(f->buf)) f->buflen = 0;
+  if (!inword && space) {
     // Ignore
-  } else if (!f->inword && !space) {
+  } else if (!inword && !space) {
     f->buf[f->buflen++] = c;
-    f->inword = 1;
-  } else if (f->inword && space) {
+    f->state |= MICROFORTH_STATE_IN_WORD;
+  } else if (inword && space) {
     f->buf[f->buflen] = '\0'; // NULL - terminate to allow C string functions
     forth_execute_word(f, f->buf, f->buflen);
     f->buflen = 0;
-    f->inword = 0;
+    f->state &= ~MICROFORTH_STATE_IN_WORD;
   } else {
     f->buf[f->buflen++] = c;
   }
