@@ -55,6 +55,7 @@ static void forth_add_word(struct forth *f, const char *name, char *code,
 static int forth_find_word(struct forth *f, const char *name) {
   int n;
   for (n = 0; n < f->memlen; n += f->mem[n]) {
+    // printf("%d %d [%s]\n", n, f->memlen, &f->mem[n + 1]);
     if (strcmp((char *) &f->mem[n + 1], name) == 0) return n;
   }
   return -1;
@@ -82,6 +83,7 @@ int forth_vprintf(forth_print_fn_t fn, void *fnd, const char *fmt, va_list p) {
         i += 2;
       } else if (fc == 'd' || fc == 'u') {
         char buf[40];
+        // long val = is_long ? va_arg(ap, long) : va_arg(ap, int);
         int len = is_long
                       ? snprintf(buf, sizeof(buf), fc == 'u' ? "%lu" : "%ld",
                                  va_arg(ap, long))
@@ -90,8 +92,8 @@ int forth_vprintf(forth_print_fn_t fn, void *fnd, const char *fmt, va_list p) {
         n += fn(buf, len, fnd);
       } else if (fc == 'g' || fc == 'f') {
         char buf[40];
-        int len = snprintf(buf, sizeof(buf), fc == 'g' ? "%g" : "%f",
-                           va_arg(ap, double));
+        double val = va_arg(ap, double);
+        int len = snprintf(buf, sizeof(buf), fc == 'g' ? "%g" : "%f", val);
         n += fn(buf, len, fnd);
       } else if (fc == 'H') {
         const char *hex = "0123456789abcdef";
@@ -137,7 +139,7 @@ static void forth_execute_word(struct forth *f, char *buf, int len) {
       f->stacklen = 0;
     }
     f->stack[f->stacklen++] = dv;
-    forth_printf(f->printfn, f->printfn_data, "%.*s ok\n", len, buf);
+    forth_printf(f->printfn, f->printfn_data, "%g ok\n", dv);
   } else {
     int n = forth_find_word(f, buf);
     if (n < 0) {
@@ -175,9 +177,20 @@ static void forth_word_words(struct forth *f) {
   forth_printf(f->printfn, f->printfn_data, " ok\n"); 
 }
 
+static void forth_word_l32(struct forth *f) {
+  if (f->stacklen < 1) {
+  } else {
+    unsigned long val, addr = f->stack[f->stacklen - 1];
+    memcpy(&val, (void *) addr, sizeof(val));
+    f->stack[f->stacklen++] = val;
+    forth_printf(f->printfn, f->printfn_data, "%#x ok\n", val);
+  }
+}
+
 void forth_register_core_words(struct forth *f) {
   forth_add_word(f, "words", NULL, forth_word_words);
   forth_add_word(f, "+", NULL, forth_word_plus);
+  forth_add_word(f, "l32", NULL, forth_word_l32);
 }
 
 void forth_process_char(struct forth *f, int c) {
